@@ -1,0 +1,316 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Apr 28 11:11:35 2025
+
+@author: okohl
+
+SubRsn Project - State-specific STN Power 4
+    State-specific STN beta power is calculated and contrasted between the med on
+    vs med off condition.
+    Results are presented in overview Figure.
+"""
+
+import numpy as np
+import pandas as pd 
+import glmtools as glm
+from scipy import stats
+from scipy.stats import t
+import seaborn as sns
+
+import matplotlib.pyplot as plt
+from matplotlib.ticker import MultipleLocator
+from matplotlib.collections import PatchCollection
+
+#%% --- Define a few functions
+
+# run glms with max tstatistic/copes permutation tests
+def condition_contrast_glms(data, metric='tstats',pooled_dims=(1),n_jobs=4):
+
+    # Define Dataset for GLM    
+    data = glm.data.TrialGLMData(data=data)
+                                 
+    # Specify regressors and Contrasts in GLM Model 
+    DC = glm.design.DesignConfig()
+    DC.add_regressor(name='Constant',rtype='Constant')
+    
+    DC.add_contrast(name="On > Off", values=[1])
+    
+    # Create design martix and fit model and grab tstats 
+    des = DC.design_from_datainfo(data.info)
+    model = glm.fit.OLSModel(des,data)
+     
+    # Permutation Test Pooling Across States 
+    perm = glm.permutations.MaxStatPermutation(des, data, 0, nperms=10000,
+                                            metric=metric, nprocesses=n_jobs,
+                                            pooled_dims=pooled_dims)
+       
+    thresh = perm.get_thresh([95])
+     
+    # Get p-values and significance mask
+    if pooled_dims:
+        if metric == "tstats":
+            metrics = model.tstats[0]
+            percentiles = stats.percentileofscore(perm.nulls, abs(metrics))            
+            mask = abs(metrics) > thresh[0]
+        elif metric == "copes":
+            metrics = model.copes[0]
+            percentiles = stats.percentileofscore(perm.nulls, abs(metrics))
+            mask = abs(metrics) > thresh[0]
+        pvalues = 1 - percentiles / 100 
+    else:
+        if metric == "tstats":
+            metrics = model.tstats[0]
+            percentiles = [stats.percentileofscore(perm.nulls[:,i], abs(metrics[i])) for i in range(perm.nulls.shape[1])] 
+            percentiles = np.array(percentiles)    
+            mask = abs(metrics) > thresh[0]
+        elif metric == "copes":
+            metrics = model.copes[0]
+            percentiles = [stats.percentileofscore(perm.nulls[:,i], abs(metrics[i])) for i in range(perm.nulls.shape[1])] 
+            percentiles = np.array(percentiles)  
+            mask = abs(metrics) > thresh[0]
+        pvalues = 1 - percentiles / 100
+    
+    return metrics, pvalues, model.dof_model, thresh, mask
+
+# define an object that will be used by the legend
+class MulticolorPatch(object):
+    def __init__(self, colors):
+        self.colors = colors
+        
+# define a handler for the MulticolorPatch object
+class MulticolorPatchHandler(object):
+    def legend_artist(self, legend, orig_handle, fontsize, handlebox):
+        width, height = handlebox.width, handlebox.height
+        patches = []
+        for i, c in enumerate(orig_handle.colors):
+            patches.append(plt.Rectangle([width/len(orig_handle.colors) * i * 2 - handlebox.xdescent-20, 
+                                          -handlebox.ydescent-4.5],
+                           (width / len(orig_handle.colors)) * 2,
+                           height*2, 
+                           facecolor=c, 
+                           edgecolor='none'))
+
+        patch = PatchCollection(patches,match_original=True)
+
+        handlebox.add_artist(patch)
+        return patch
+    
+    
+def generalized_esd(data, max_outliers, alpha=0.05):
+    """
+    Perform the Generalized ESD test for outliers.
+    
+    Parameters:
+    - data: 1D numpy array
+    - max_outliers: maximum number of outliers to test for
+    - alpha: significance level (default 0.05)
+    
+    Returns:
+    - outlier_indices: indices of detected outliers
+    """
+    data = np.asarray(data)
+    n = len(data)
+    outlier_indices = []
+
+    R = []  # test statistics
+    data_copy = data.copy()
+
+    for i in range(1, max_outliers + 1):
+        mean = np.mean(data_copy)
+        std = np.std(data_copy, ddof=1)
+
+        # Calculate deviations
+        deviations = np.abs(data_copy - mean)
+        max_idx = np.argmax(deviations)
+        R_i = deviations[max_idx] / std
+        R.append(R_i)
+
+        # Remove the most extreme point temporarily
+        data_copy = np.delete(data_copy, max_idx)
+
+    # Now compute critical values
+    lam = []
+    for i in range(1, max_outliers + 1):
+        p = 1 - alpha / (2 * (n - i + 1))
+        t_dist = t.ppf(p, df=n - i - 1)
+        lambda_i = ((n - i) * t_dist) / np.sqrt((n - i - 1 + t_dist**2) * (n - i + 1))
+        lam.append(lambda_i)
+
+    # Determine how many outliers
+    num_outliers = 0
+    for i in range(max_outliers):
+        if R[i] > lam[i]:
+            num_outliers = i + 1
+
+    # Get actual indices of the outliers
+    if num_outliers > 0:
+        data_temp = data.copy()
+        for _ in range(num_outliers):
+            mean = np.mean(data_temp)
+            deviations = np.abs(data_temp - mean)
+            idx = np.argmax(deviations)
+            outlier_indices.append(np.where(data == data_temp[idx])[0][0])
+            data_temp = np.delete(data_temp, idx)
+
+    return sorted(outlier_indices)
+
+#%% --- Start Script --- 
+
+# Dir where data is
+spect_dir = '.../data/hmm/post_hoc/8_states_norm/stn_psd'
+hmm_dir = '.../data/hmm/post_hoc/8_states_norm/inf'
+demo_dir = '.../data/demographics'
+out_dir = '.../results/hmm/post_hoc/8_states_norm/stn_psd' 
+ 
+# Load Files
+f = np.load(f"{spect_dir}/f_new.npy")
+psd = np.load(f"{spect_dir}/psd_new.npy")
+w = np.load(f"{spect_dir}/w_new.npy")
+fo = np.load(f"{hmm_dir}/fo.npy")
+
+# Mask for Freq range of interest
+fmask = np.logical_and(f >= 13, f <= 30)
+f = f[fmask]
+
+# Load Group Data
+df = pd.read_csv( f'{demo_dir}/behavioural_all.csv')
+mask = (df["Session" ].values < 3) & (df['withinMed'] == 1) 
+condition  = df["Session"].values[mask] # 1 = Off; 2 = On
+
+# Grab STN 
+p = psd.mean(axis=2)
+
+# Subtract mean across State
+mean_p = np.empty([50,50])
+for iSub in range(p.shape[0]):
+    mean_p[iSub] = np.average(p[iSub], axis=0, weights=fo[iSub])
+    p[iSub] = p[iSub] - mean_p[iSub]
+         
+# Add Mean and State specific spectra
+comb_p = p + mean_p[:,np.newaxis]
+
+comb_p = comb_p[:,:,fmask].mean(axis=2)
+mean_p = mean_p[:,fmask].mean(axis=1)
+p = p[:,:,fmask].mean(axis=2)
+
+# Remove Outliers
+outliers = generalized_esd(comb_p[:,:].mean(axis=1), 10, alpha=0.05)
+
+out = []
+for iK in range(8):
+    out.append(generalized_esd(comb_p[:,iK], 5, alpha=0.05))
+    
+outliers = np.unique(np.hstack(out)).astype(int)
+
+goods = np.ones(len(p)).astype(bool)
+for o in outliers:
+    goods[o] = False
+    if o > 25:
+        goods[o-25] = False
+    else:
+        goods[o+25] = False
+
+comb_p = comb_p[goods]
+condition = condition[goods]
+
+#%% Medication off vs Medication On Conidtion Contrast
+
+# --- Max T-Statistic Permutation Tests ---
+    
+# set covariates
+covariates = {}  
+
+# Difference between On and Off
+diff = comb_p[condition==1] - comb_p[condition==2]
+
+ts, ps, _, _, _ = condition_contrast_glms(diff, metric='tstats')
+ 
+# Bring Data into longformat for plotting
+nSub = len(comb_p)
+
+df = []
+for iState in range(8):
+    
+    # Get Vars vor Columns
+    m = np.hstack([comb_p[:,iState]])
+    c = np.hstack([np.ones(int(nSub/2)),np.ones(int(nSub/2))*2])
+    s = np.ones(nSub) * (iState + 1) 
+    
+    # Stack Horizontally and put into longformat
+    df.append(np.vstack([m,c,s]).T)
+
+df = pd.DataFrame(np.vstack(df),columns=["metric","condition","state"])
+
+# Set Colors and Vars 
+state_labels = ['State1','State2','State3','State4',
+                'State5','State6','State7','State8'] 
+
+# Colors 
+greys = ['#595959', '#262626',] #'#404040']
+greys_over = ['#757575','#9e9e9e','#757575','#9e9e9e','#757575','#9e9e9e',
+              '#757575','#9e9e9e','#757575','#9e9e9e','#9e9e9e','#757575',
+              '#9e9e9e','#757575','#9e9e9e','#757575',]
+
+colors =  plt.cm.tab20( np.arange(20).astype(int) )
+cols_over = [colors[6],colors[7],colors[14],colors[15],
+             colors[14],colors[15],colors[14],colors[15],
+             colors[14],colors[15],colors[2],colors[3],
+             colors[14],colors[15], colors[14],colors[15],] 
+
+# --- Plotting ---
+
+fig, ax = plt.subplots(dpi=600,figsize=(8,4))
+bplot = sns.boxplot(x="state", y='metric', hue='condition', data=df, 
+                    palette=['white','white'], width=.7, legend=False, 
+                    showfliers=False,ax = ax)
+points = sns.stripplot(x="state", y='metric',hue='condition',data=df, 
+              palette=cols_over, size=4, dodge=True, 
+              legend=False,ax = ax)
+
+# adding transparency to colors
+for ind, patch in enumerate(bplot.patches):
+    patch.set_edgecolor(greys_over[1])
+
+# adding transparency to colors
+for ind, patch in enumerate(points.collections):
+    patch.set_facecolor(cols_over[ind])
+
+# Make Axis pretty
+ax.xaxis.labelpad = 10
+ax.set_xticklabels(state_labels, fontsize=12)
+ax.set_xlabel('')
+ax.set_ylabel('Relative Beta\nPower (a.u.)', fontsize = 18, labelpad = 8)
+
+# Set y-ticks
+ax.yaxis.set_major_locator(MultipleLocator(.01))
+ax.yaxis.set_minor_locator(MultipleLocator(.005))
+  
+# Remove Box Around Subplot
+sns.despine(ax=ax, top=True, right=True, left=False,
+        bottom=False, offset=None, trim=False)
+
+# Significance of Condition Contrast On vs Hc
+for iState in range(8):
+    
+    dots = comb_p[:,iState]
+    
+    # Get Significance stars 
+    if ps[iState] < .01:      
+        p = '**'  
+        x = (iState)  - .18  
+        
+        y = np.max(dots) * 1.05 
+        ax.text(x=x , y=y , s=p , zorder=10, size=20)
+        ax.plot([iState - .2 , iState + .2], [y, y], 'k-', lw=1.5) 
+    elif ps[iState] < .05:
+        p = "*"   
+        x = (iState) - .08
+        
+        y = np.max(dots) * 1.05 
+        ax.text(x=x , y=y , s=p , zorder=10, size=20)
+        ax.plot([iState - .1, iState + .16], [y, y], 'k-', lw=1.5) 
+    else:
+        p = ""
+ 
+plt.savefig(f'{out_dir}/state_specific_meanSTN_betaPower_outliers_removed_HQ.svg')
