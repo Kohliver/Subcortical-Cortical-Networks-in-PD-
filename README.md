@@ -35,3 +35,13 @@ __[https://osl-ephys.readthedocs.io/en/latest/install.html](https://osl-ephys.re
 __[https://osl-dynamics.readthedocs.io/en/latest/install.html](https://osl-dynamics.readthedocs.io/en/latest/install.html)__
 
 
+---
+
+# Reference to Canonical Networks
+In this study, large-scale cortical networks were inferred using TDE-HMMs fitting previously defined canonical networks. The canonical networks used for this analysis are available at:
+__[https://github.com/OHBA-analysis/Canonical-HMM-Networks](https://github.com/OHBA-analysis/Canonical-HMM-Networks)__
+
+Archived versions of this repository can be found at:
+__[https://zenodo.org/records/18131225](https://zenodo.org/records/18131225)__
+
+For the present study, we used version v0.1.1 of the repository.
